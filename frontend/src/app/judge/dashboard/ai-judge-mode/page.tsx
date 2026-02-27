@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 type PredictResponse =
   | {
       decision: string;
-      confidence: number; // 0..1 or 0..something (yours is 0..1 rounded)
+      confidence: number; 
       prob_granted: number;
       prob_rejected: number;
       received_keys: string[];
@@ -58,9 +58,8 @@ export default function AIJudgeModePage() {
     return Math.round((result.confidence ?? 0) * 100);
   }, [result]);
 
-  // Build ONE "recent case" item using the prediction result (keeping your UI layout)
+  // Build ONE "recent case" item using the prediction result 
   const recentCases = useMemo(() => {
-    // If no result yet, return your old dummy list or an empty list
     if (!result) {
       return [
         {
@@ -90,7 +89,6 @@ export default function AIJudgeModePage() {
       ];
     }
 
-    // If backend returned error, show one card indicating error (still same UI)
     if ("error" in result) {
       return [
         {
@@ -111,12 +109,11 @@ export default function AIJudgeModePage() {
         ? `Case Type: ${String(payload.crime_type)}`
         : "Submitted Case");
 
-    // Map backend decision to your UI labels
+
     const aiRecommendation =
       result.decision === "Bail Granted" ? "Grant Bail" : "Reject Bail";
 
-    // Dummy biasScore for now (your /predict endpoint doesn’t return a bias score)
-    // Later, if you add bias score to /predict, just replace this with result.bias_score
+
     const dummyBiasScore = 2.5;
 
     return [
@@ -131,10 +128,10 @@ export default function AIJudgeModePage() {
     ];
   }, [result, payload]);
 
-  // Top cards (keeping UI) - we can keep dummy numbers, but one can be driven from result
+
   const activeCasesCount = 12; // dummy
   const avgConfidenceText =
-    confidencePercent !== null ? `${confidencePercent}%` : "84%"; // show real confidence if available
+    confidencePercent !== null ? `${confidencePercent}%` : "84%"; 
   const biasAlertCount = 0; // dummy
 
   return (
@@ -188,14 +185,14 @@ export default function AIJudgeModePage() {
             Recent Cases with AI Analysis
           </h2>
 
-          {/* Optional: show a small note if no stored prediction */}
+          
           {!result && (
             <p className="mt-2 text-sm text-slate-400">
               No submitted case result found yet. Submit a case from Court Authority → Input Data.
             </p>
           )}
 
-          {/* Optional: show backend error message (but keep UI) */}
+         
           {result && "error" in result && (
             <p className="mt-2 text-sm text-red-400">
               Backend error: {result.error}
@@ -255,7 +252,7 @@ export default function AIJudgeModePage() {
           </div>
         </div>
 
-        {/* Keep your tools UI unchanged */}
+       
         <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-8 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur">
           <h2 className="text-xl font-semibold text-white">
             AI Analysis Tools

@@ -1,9 +1,53 @@
+"use client";
+
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { FormEvent, useState } from "react";
+
+import { apiFetch, type AuthResponse } from "@/lib/api";
+import { persistAuth } from "@/lib/auth";
 
 const inputStyles =
   "w-full rounded-lg border border-white/20 bg-transparent px-4 py-3 text-sm text-white placeholder:text-slate-400 focus:border-sky-400 focus:outline-none";
 
 export default function JudgeSignupPage() {
+  const router = useRouter();
+  const [fullName, setFullName] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [benchId, setBenchId] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await apiFetch("/auth/judge/signup", {
+        method: "POST",
+        body: JSON.stringify({
+          full_name: fullName,
+          username,
+          password,
+          bench_id: benchId,
+        }),
+      });
+      const data = (await res.json()) as AuthResponse | { detail?: string };
+      if (!res.ok) {
+        const msg = typeof (data as any)?.detail === "string" ? (data as any).detail : "Signup failed";
+        throw new Error(msg);
+      }
+      persistAuth((data as AuthResponse).access_token, "judge");
+      router.push("/judge/dashboard");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <div className="relative mx-auto flex w-full max-w-md flex-col gap-8 px-6 py-12">
@@ -25,7 +69,15 @@ export default function JudgeSignupPage() {
             oversight.
           </p>
         </div>
-        <form className="rounded-2xl border border-white/10 bg-slate-900/40 p-8 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur">
+        <form
+          onSubmit={handleSubmit}
+          className="rounded-2xl border border-white/10 bg-slate-900/40 p-8 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur"
+        >
+          {error && (
+            <p className="mb-4 rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-300">
+              {error}
+            </p>
+          )}
           <div className="space-y-4">
             <label className="block text-sm text-white">
               <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">
@@ -35,6 +87,9 @@ export default function JudgeSignupPage() {
                 type="text"
                 placeholder="Justice Ada Spencer"
                 className={inputStyles}
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+                required
               />
             </label>
             <label className="block text-sm text-white">
@@ -45,6 +100,9 @@ export default function JudgeSignupPage() {
                 type="text"
                 placeholder="bench.username"
                 className={inputStyles}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                required
               />
             </label>
             <label className="block text-sm text-white">
@@ -55,6 +113,9 @@ export default function JudgeSignupPage() {
                 type="password"
                 placeholder="Create a password"
                 className={inputStyles}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
               />
             </label>
             <label className="block text-sm text-white">
@@ -65,14 +126,18 @@ export default function JudgeSignupPage() {
                 type="text"
                 placeholder="E.g. 9th-District-42"
                 className={inputStyles}
+                value={benchId}
+                onChange={(e) => setBenchId(e.target.value)}
+                required
               />
             </label>
           </div>
           <button
             type="submit"
-            className="mt-8 w-full rounded-lg bg-white py-3 text-sm font-semibold text-slate-900 transition hover:-translate-y-0.5"
+            className="mt-8 w-full rounded-lg bg-white py-3 text-sm font-semibold text-slate-900 transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={loading}
           >
-            Sign up
+            {loading ? "Signing up..." : "Sign up"}
           </button>
         </form>
       </div>

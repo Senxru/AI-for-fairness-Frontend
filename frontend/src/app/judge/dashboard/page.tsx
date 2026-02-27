@@ -1,6 +1,18 @@
+"use client";
+
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+
+import { clearAuth } from "@/lib/auth";
 
 export default function JudgeDashboard() {
+  const router = useRouter();
+
+  const logout = () => {
+    clearAuth();
+    router.push("/judge/login");
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <div className="relative mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-12">
@@ -13,12 +25,13 @@ export default function JudgeDashboard() {
               Welcome to your judicial decision support system
             </p>
           </div>
-          <Link
-            href="/"
+          <button
+            type="button"
+            onClick={logout}
             className="text-sm text-slate-400 transition hover:text-white"
           >
             Log out
-          </Link>
+          </button>
         </div>
 
         <div className="grid gap-6 md:grid-cols-2">

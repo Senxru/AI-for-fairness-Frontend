@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
+import { apiFetch } from "@/lib/api";
+
 type AuditReport = {
   DP: number;
   EO: number;
@@ -17,14 +19,12 @@ export default function BiasDetectionPage() {
   const [loading, setLoading] = useState(true);
 
 
-  const AUDIT_URL = "http://127.0.0.1:8001/audit-report";
-
   useEffect(() => {
     const fetchAudit = async () => {
       try {
         setLoading(true);
 
-        const res = await fetch(AUDIT_URL, { cache: "no-store" });
+        const res = await apiFetch("/audit-report", { cache: "no-store" });
         const data = (await res.json()) as AuditReport;
 
         if (!res.ok || data.error) {
@@ -58,13 +58,12 @@ export default function BiasDetectionPage() {
   };
 
   const getScoreColor = (score: number) => {
-    // Score from backend is 0..1-ish. We map to 0..10 UI, but use backend thresholds for colors.
     if (score < 0.1) return "text-emerald-400";
     if (score < 0.3) return "text-yellow-400";
     return "text-red-400";
   };
 
-  // Map backend 0..1 bias score => UI /10 score
+ 
   const systemScore10 = useMemo(() => {
     if (!report) return 0;
     return Math.min(10, Math.max(0, report["Bias Score"] * 10));
@@ -77,7 +76,7 @@ export default function BiasDetectionPage() {
     return "High Risk";
   }, [report]);
 
-  // Replace your hardcoded biasMetrics with live API-based ones (keeping same UI fields)
+  
   const biasMetrics = useMemo(() => {
     if (!report) return [];
 
@@ -115,7 +114,7 @@ export default function BiasDetectionPage() {
     ];
   }, [report]);
 
-  // Keep your court-level analysis dummy
+ 
   const courtsData = [
     { name: "9th District Court", biasScore: 2.1, cases: 342, status: "Low Risk" },
     { name: "Central Judicial District", biasScore: 4.8, cases: 289, status: "High Risk" },
@@ -143,7 +142,7 @@ export default function BiasDetectionPage() {
           </div>
         </div>
 
-        {/* SYSTEM-WIDE SCORE (LIVE) */}
+       
         <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-8 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur">
           {loading ? (
             <p className="text-slate-300">Loading bias report...</p>
@@ -186,7 +185,7 @@ export default function BiasDetectionPage() {
           )}
         </div>
 
-        {/* METRICS CARDS (LIVE, SAME UI) */}
+       
         {!loading && report && !report.error && (
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {biasMetrics.map((metric) => (
@@ -230,7 +229,7 @@ export default function BiasDetectionPage() {
           </div>
         )}
 
-        {/* KEEP DUMMY COURT-LEVEL ANALYSIS */}
+        
         <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-8 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur">
           <h2 className="text-xl font-semibold text-white">
             Court-Level Analysis
@@ -271,7 +270,6 @@ export default function BiasDetectionPage() {
           </div>
         </div>
 
-        {/* KEEP EXPORTS & REPORTS */}
         <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-8 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur">
           <h2 className="text-xl font-semibold text-white">
             Export & Reports

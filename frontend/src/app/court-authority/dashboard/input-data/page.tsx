@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { apiFetch } from "@/lib/api";
+
 type PredictOk = {
   decision: string;
   confidence: number;
@@ -18,14 +20,12 @@ type PredictResponse = PredictOk | PredictErr;
 export default function InputDataPage() {
   const router = useRouter();
 
-  const API_BASE = "http://127.0.0.1:8001";
-
-  // ✅ ONLY the fields we will actually send
+  
   const [form, setForm] = useState({
     date: "",
     accused_gender: "male",
     region: "",
-    facts: "", // <-- single textarea value
+    facts: "", 
   });
 
   const [loading, setLoading] = useState(false);
@@ -44,7 +44,7 @@ export default function InputDataPage() {
     setLoading(true);
 
     try {
-      // ✅ Send ONLY what you want
+     
       const bodyToSend = {
         date: form.date,
         accused_gender: form.accused_gender,
@@ -52,15 +52,14 @@ export default function InputDataPage() {
         facts: form.facts,
       };
 
-      const res = await fetch(`${API_BASE}/predict`, {
+      const res = await apiFetch("/predict", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(bodyToSend),
       });
 
       const data = (await res.json()) as PredictResponse;
 
-      // ✅ show backend errors
+      // show backend errors
       if (!res.ok || "error" in data) {
         const msg =
           "error" in data ? data.error : `Request failed with status ${res.status}`;
@@ -68,7 +67,7 @@ export default function InputDataPage() {
         return;
       }
 
-      // ✅ store response for the AI Judge Mode page
+      //  store response for the AI Judge Mode page
       sessionStorage.setItem("ai_judge_prediction_result", JSON.stringify(data));
       sessionStorage.setItem("ai_judge_last_payload", JSON.stringify(bodyToSend));
 
@@ -167,7 +166,7 @@ export default function InputDataPage() {
               </label>
             </div>
 
-            {/* ✅ ONLY ONE TEXTAREA */}
+           
             <label className="block text-sm text-white">
               <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">
                 Case Description * (Sent as Facts)

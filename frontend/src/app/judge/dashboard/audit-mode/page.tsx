@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
+import { apiFetch } from "@/lib/api";
+
 type AuditReport = {
   DP: number;
   EO: number;
@@ -21,8 +23,7 @@ export default function AuditModePage() {
       try {
         setLoading(true);
 
-        // 🔥 HARDCODED BACKEND URL
-        const res = await fetch("http://127.0.0.1:8001/audit-report");
+        const res = await apiFetch("/audit-report", { cache: "no-store" });
 
         const data = await res.json();
 
@@ -38,7 +39,7 @@ export default function AuditModePage() {
           "Bias Score": 0,
           "Bias Level": "Low",
           cases_used: 0,
-          error: err.message || "Unknown error",
+          error: err instanceof Error ? err.message : "Unknown error",
         });
       } finally {
         setLoading(false);
@@ -140,7 +141,7 @@ export default function AuditModePage() {
           )}
         </div>
 
-        {/* METRIC CARDS */}
+        
         {!loading && report && !report.error && (
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {biasMetrics.map((metric) => (
