@@ -4,9 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 import joblib
 import pandas as pd
+import shap
 
 import os
 import sqlite3
+import json
 from datetime import datetime, timedelta, timezone
 
 from jose import JWTError, jwt
@@ -32,6 +34,32 @@ app.add_middleware(
 
 model = joblib.load("ai_judge_model retrained.pkl")
 
+# SHAP explainer (initialized lazily on first prediction)
+shap_explainer = None
+shap_feature_names = None
+shap_use_transform = False
+shap_preprocessor = None
+shap_estimator = None
+model_numeric_cols = None
+shap_init_error = None
+
+
+def init_model_metadata() -> None:
+    """Extract metadata from the loaded sklearn pipeline (if present)."""
+    global model_numeric_cols
+    if model_numeric_cols is not None:
+        return
+    model_numeric_cols = []
+    try:
+        if hasattr(model, "steps") and len(getattr(model, "steps", [])) > 0:
+            first = model.steps[0][1]
+            for name, _trans, cols in getattr(first, "transformers", []):
+                if name == "num" and isinstance(cols, list):
+                    model_numeric_cols = list(cols)
+                    break
+    except Exception:
+        model_numeric_cols = []
+
 
 # -------------------------
 # Auth (JWT + SQLite users)
@@ -55,6 +83,102 @@ def _get_db_conn() -> sqlite3.Connection:
     return conn
 
 
+def get_shap_explainer(background_df: pd.DataFrame):
+    """
+    Lazily create and cache a SHAP explainer for the current model.
+
+    We use the first request's case_df as background data to avoid
+    loading heavy training datasets in the API process.
+    """
+    global shap_explainer, shap_feature_names, shap_use_transform, shap_preprocessor, shap_estimator, model_numeric_cols, shap_init_error
+    if shap_explainer is not None:
+        return shap_explainer
+
+    # If the model is a sklearn Pipeline/ColumnTransformer stack, explain on transformed numeric features.
+    try:
+        is_pipeline_like = hasattr(model, "steps") and hasattr(model, "__getitem__")
+        if is_pipeline_like:
+            pre = model[:-1]
+            est = model[-1]
+
+            # Cache numeric column names from the ColumnTransformer if available
+            if model_numeric_cols is None:
+                try:
+                    ct = model.steps[0][1]
+                    for name, _trans, cols in getattr(ct, "transformers", []):
+                        if name == "num" and isinstance(cols, list):
+                            model_numeric_cols = list(cols)
+                            break
+                except Exception:
+                    model_numeric_cols = []
+
+            X_bg = pre.transform(background_df)
+            # Convert sparse to dense for SHAP masker if needed
+            if hasattr(X_bg, "toarray"):
+                X_bg = X_bg.toarray()
+            X_bg = np.asarray(X_bg, dtype=np.float32)
+            try:
+                shap_feature_names = list(pre.get_feature_names_out())
+            except Exception:
+                shap_feature_names = None
+
+            # Best explainer for XGBoost: TreeExplainer on the underlying tree model.
+            try:
+                shap_explainer = shap.TreeExplainer(est)
+                shap_init_error = None
+            except Exception as e:
+                shap_explainer = None
+                shap_init_error = f"TreeExplainer init failed: {e}"
+                return None
+
+            shap_use_transform = True
+            shap_preprocessor = pre
+            shap_estimator = est
+            return shap_explainer
+    except Exception:
+        pass
+
+    # Fallback: try a generic explainer directly on the model (no Independent masker on raw strings).
+    try:
+        shap_explainer = shap.Explainer(model, background_df)
+        shap_feature_names = list(background_df.columns)
+        shap_use_transform = False
+        shap_preprocessor = None
+        shap_estimator = None
+        shap_init_error = None
+        return shap_explainer
+    except Exception:
+        shap_explainer = None
+        shap_feature_names = None
+        shap_use_transform = False
+        shap_preprocessor = None
+        shap_estimator = None
+        shap_init_error = "Generic SHAP explainer init failed."
+        return None
+
+
+def sanitize_for_shap(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    SHAP explainers often assume no None values. Keep types stable:
+    - numeric columns -> fill NaN/None with 0
+    - non-numeric columns -> fill NaN/None with empty string
+    """
+    out = df.copy()
+    num_cols = model_numeric_cols or []
+
+    for col in out.columns:
+        s = out[col]
+        if col in num_cols:
+            out[col] = pd.to_numeric(s, errors="coerce").fillna(0)
+            continue
+
+        if pd.api.types.is_numeric_dtype(s):
+            out[col] = s.fillna(0)
+        else:
+            out[col] = s.fillna("").astype(str)
+    return out
+
+
 def init_db() -> None:
     conn = _get_db_conn()
     try:
@@ -72,6 +196,60 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);")
+
+        # Cases submitted by court authority (inputs + AI output)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                created_by_user_id INTEGER NOT NULL,
+                payload_json TEXT NOT NULL,
+                accused_gender TEXT,
+                region TEXT,
+                court TEXT,
+                date TEXT,
+                FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                prob_granted REAL NOT NULL,
+                prob_rejected REAL NOT NULL,
+                shap_json TEXT,
+                FOREIGN KEY(case_id) REFERENCES cases(id) ON DELETE CASCADE
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS judge_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER NOT NULL,
+                judge_user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                notes TEXT,
+                UNIQUE(case_id, judge_user_id),
+                FOREIGN KEY(case_id) REFERENCES cases(id) ON DELETE CASCADE,
+                FOREIGN KEY(judge_user_id) REFERENCES users(id)
+            );
+            """
+        )
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_created_by ON cases(created_by_user_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_judge_decisions_judge ON judge_decisions(judge_user_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_judge_decisions_case ON judge_decisions(case_id);")
+
         conn.commit()
     finally:
         conn.close()
@@ -80,6 +258,7 @@ def init_db() -> None:
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    init_model_metadata()
 
 
 def get_db():
@@ -209,6 +388,39 @@ class AuthResponse(BaseModel):
     user: UserPublic
 
 
+class JudgeDecisionRequest(BaseModel):
+    case_id: int
+    decision: str = Field(pattern="^(Bail Granted|Bail Rejected)$")
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class JudgeDecisionResponse(BaseModel):
+    case_id: int
+    judge_user_id: int
+    decision: str
+    notes: str | None = None
+    created_at: str
+
+
+class JudgeMetricsResponse(BaseModel):
+    judge_user_id: int
+    total_cases_with_ai: int
+    decided_cases: int
+    agreement_rate: float | None = None
+    disagreement_rate: float | None = None
+    by_gender: dict
+    by_region: dict
+    judge_grant_rate_by_gender: dict
+    judge_grant_rate_by_region: dict
+    judge_grant_rate_disparity_gender: float | None = None
+    judge_grant_rate_disparity_region: float | None = None
+    override_rate_by_gender: dict
+    override_rate_by_region: dict
+    override_disparity_gender: float | None = None
+    override_disparity_region: float | None = None
+    flags: list[str]
+
+
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     conn: sqlite3.Connection = Depends(get_db),
@@ -286,6 +498,290 @@ def me(current_user: UserPublic = Depends(get_current_user)):
     return current_user
 
 
+@app.post("/judge/decision", response_model=JudgeDecisionResponse)
+def submit_judge_decision(
+    payload: JudgeDecisionRequest,
+    current_user: UserPublic = Depends(require_role("judge")),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    # Ensure case exists
+    case_row = conn.execute("SELECT id FROM cases WHERE id = ?;", (payload.case_id,)).fetchone()
+    if case_row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO judge_decisions (case_id, judge_user_id, created_at, decision, notes)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(case_id, judge_user_id) DO UPDATE SET
+            created_at=excluded.created_at,
+            decision=excluded.decision,
+            notes=excluded.notes;
+        """,
+        (int(payload.case_id), int(current_user.id), now, payload.decision, payload.notes),
+    )
+    conn.commit()
+    return {
+        "case_id": int(payload.case_id),
+        "judge_user_id": int(current_user.id),
+        "decision": payload.decision,
+        "notes": payload.notes,
+        "created_at": now,
+    }
+
+
+@app.get("/judge/metrics/me", response_model=JudgeMetricsResponse)
+def judge_metrics_me(
+    current_user: UserPublic = Depends(require_role("judge")),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    rows = conn.execute(
+        """
+        SELECT
+            c.id as case_id,
+            c.accused_gender as accused_gender,
+            c.region as region,
+            p.decision as ai_decision,
+            jd.decision as judge_decision
+        FROM cases c
+        JOIN ai_predictions p ON p.case_id = c.id
+        LEFT JOIN judge_decisions jd
+            ON jd.case_id = c.id AND jd.judge_user_id = ?
+        ORDER BY c.id DESC;
+        """,
+        (int(current_user.id),),
+    ).fetchall()
+
+    total = len(rows)
+    decided = sum(1 for r in rows if r["judge_decision"] is not None)
+    agreements = sum(1 for r in rows if r["judge_decision"] is not None and r["judge_decision"] == r["ai_decision"])
+    disagreements = sum(1 for r in rows if r["judge_decision"] is not None and r["judge_decision"] != r["ai_decision"])
+
+    denom = decided if decided > 0 else None
+    agreement_rate = (agreements / denom) if denom else None
+    disagreement_rate = (disagreements / denom) if denom else None
+
+    MIN_GROUP = 5
+
+    def _rate_disparity(rate_map: dict) -> float | None:
+        vals = [v for v in rate_map.values() if v is not None]
+        if len(vals) < 2:
+            return None
+        return float(max(vals) - min(vals))
+
+    def _grant_rates_by(key: str) -> dict:
+        # grant_rate = granted / decided for each bucket (only if bucket.decided >= MIN_GROUP)
+        counts = {}
+        for r in rows:
+            bucket = (r[key] or "unknown").strip() if isinstance(r[key], str) else (r[key] or "unknown")
+            if bucket == "":
+                bucket = "unknown"
+            counts.setdefault(bucket, {"decided": 0, "granted": 0})
+            if r["judge_decision"] is not None:
+                counts[bucket]["decided"] += 1
+                if r["judge_decision"] == "Bail Granted":
+                    counts[bucket]["granted"] += 1
+
+        out_rates = {}
+        for b, c in counts.items():
+            if c["decided"] >= MIN_GROUP:
+                out_rates[b] = c["granted"] / c["decided"] if c["decided"] else None
+            else:
+                out_rates[b] = None
+        return out_rates
+
+    def _override_rates_by(key: str) -> dict:
+        # override_rate = overrides / decided for each bucket
+        counts = {}
+        for r in rows:
+            bucket = (r[key] or "unknown").strip() if isinstance(r[key], str) else (r[key] or "unknown")
+            if bucket == "":
+                bucket = "unknown"
+            counts.setdefault(bucket, {"decided": 0, "override": 0})
+            if r["judge_decision"] is not None:
+                counts[bucket]["decided"] += 1
+                if r["judge_decision"] != r["ai_decision"]:
+                    counts[bucket]["override"] += 1
+
+        out_rates = {}
+        for b, c in counts.items():
+            if c["decided"] >= MIN_GROUP:
+                out_rates[b] = c["override"] / c["decided"] if c["decided"] else None
+            else:
+                out_rates[b] = None
+        return out_rates
+
+    def _bucket_counts(key: str):
+        out = {}
+        for r in rows:
+            k = (r[key] or "unknown").strip() if isinstance(r[key], str) else (r[key] or "unknown")
+            if k == "":
+                k = "unknown"
+            out.setdefault(k, {"total": 0, "decided": 0, "agree": 0, "disagree": 0})
+            out[k]["total"] += 1
+            if r["judge_decision"] is not None:
+                out[k]["decided"] += 1
+                if r["judge_decision"] == r["ai_decision"]:
+                    out[k]["agree"] += 1
+                else:
+                    out[k]["disagree"] += 1
+        return out
+
+    judge_grant_rate_by_gender = _grant_rates_by("accused_gender")
+    judge_grant_rate_by_region = _grant_rates_by("region")
+    override_rate_by_gender = _override_rates_by("accused_gender")
+    override_rate_by_region = _override_rates_by("region")
+
+    disparity_gender = _rate_disparity(judge_grant_rate_by_gender)
+    disparity_region = _rate_disparity(judge_grant_rate_by_region)
+    override_disp_gender = _rate_disparity(override_rate_by_gender)
+    override_disp_region = _rate_disparity(override_rate_by_region)
+
+    flags: list[str] = []
+    if decided >= 10:
+        if disparity_gender is not None and disparity_gender >= 0.2:
+            flags.append("Potential gender disparity in judge grant rate (>= 20pp)")
+        if disparity_region is not None and disparity_region >= 0.2:
+            flags.append("Potential region disparity in judge grant rate (>= 20pp)")
+        if override_disp_gender is not None and override_disp_gender >= 0.25:
+            flags.append("Potential gender disparity in overrides (>= 25pp)")
+        if override_disp_region is not None and override_disp_region >= 0.25:
+            flags.append("Potential region disparity in overrides (>= 25pp)")
+    else:
+        flags.append("Not enough decided cases for disparity signals (need >= 10)")
+
+    return {
+        "judge_user_id": int(current_user.id),
+        "total_cases_with_ai": total,
+        "decided_cases": decided,
+        "agreement_rate": agreement_rate,
+        "disagreement_rate": disagreement_rate,
+        "by_gender": _bucket_counts("accused_gender"),
+        "by_region": _bucket_counts("region"),
+        "judge_grant_rate_by_gender": judge_grant_rate_by_gender,
+        "judge_grant_rate_by_region": judge_grant_rate_by_region,
+        "judge_grant_rate_disparity_gender": disparity_gender,
+        "judge_grant_rate_disparity_region": disparity_region,
+        "override_rate_by_gender": override_rate_by_gender,
+        "override_rate_by_region": override_rate_by_region,
+        "override_disparity_gender": override_disp_gender,
+        "override_disparity_region": override_disp_region,
+        "flags": flags,
+    }
+
+
+@app.get("/authority/metrics/judges")
+def authority_metrics_judges(
+    current_user: UserPublic = Depends(require_role("court_authority")),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    # Aggregate for all judges: total decided, agreement rate, and disparity signals.
+    judges = conn.execute("SELECT id, username, full_name FROM users WHERE role = 'judge';").fetchall()
+    out = []
+    for j in judges:
+        rows = conn.execute(
+            """
+            SELECT
+                c.accused_gender as accused_gender,
+                c.region as region,
+                p.decision as ai_decision,
+                jd.decision as judge_decision
+            FROM cases c
+            JOIN ai_predictions p ON p.case_id = c.id
+            JOIN judge_decisions jd ON jd.case_id = c.id AND jd.judge_user_id = ?
+            """,
+            (int(j["id"]),),
+        ).fetchall()
+        decided = len(rows)
+        agree = sum(1 for r in rows if r["judge_decision"] == r["ai_decision"])
+        disagree = decided - agree
+
+        MIN_GROUP = 5
+
+        def _rate_disparity(rate_map: dict) -> float | None:
+            vals = [v for v in rate_map.values() if v is not None]
+            if len(vals) < 2:
+                return None
+            return float(max(vals) - min(vals))
+
+        def _grant_rates_by(key: str) -> dict:
+            counts = {}
+            for r in rows:
+                bucket = (r[key] or "unknown").strip() if isinstance(r[key], str) else (r[key] or "unknown")
+                if bucket == "":
+                    bucket = "unknown"
+                counts.setdefault(bucket, {"decided": 0, "granted": 0})
+                counts[bucket]["decided"] += 1
+                if r["judge_decision"] == "Bail Granted":
+                    counts[bucket]["granted"] += 1
+            out_rates = {}
+            for b, c in counts.items():
+                if c["decided"] >= MIN_GROUP:
+                    out_rates[b] = c["granted"] / c["decided"] if c["decided"] else None
+                else:
+                    out_rates[b] = None
+            return out_rates
+
+        def _override_rates_by(key: str) -> dict:
+            counts = {}
+            for r in rows:
+                bucket = (r[key] or "unknown").strip() if isinstance(r[key], str) else (r[key] or "unknown")
+                if bucket == "":
+                    bucket = "unknown"
+                counts.setdefault(bucket, {"decided": 0, "override": 0})
+                counts[bucket]["decided"] += 1
+                if r["judge_decision"] != r["ai_decision"]:
+                    counts[bucket]["override"] += 1
+            out_rates = {}
+            for b, c in counts.items():
+                if c["decided"] >= MIN_GROUP:
+                    out_rates[b] = c["override"] / c["decided"] if c["decided"] else None
+                else:
+                    out_rates[b] = None
+            return out_rates
+
+        grant_gender = _grant_rates_by("accused_gender")
+        grant_region = _grant_rates_by("region")
+        override_gender = _override_rates_by("accused_gender")
+        override_region = _override_rates_by("region")
+
+        flags: list[str] = []
+        if decided >= 10:
+            dg = _rate_disparity(grant_gender)
+            dr = _rate_disparity(grant_region)
+            og = _rate_disparity(override_gender)
+            orr = _rate_disparity(override_region)
+            if dg is not None and dg >= 0.2:
+                flags.append("Potential gender disparity (grant rate)")
+            if dr is not None and dr >= 0.2:
+                flags.append("Potential region disparity (grant rate)")
+            if og is not None and og >= 0.25:
+                flags.append("Potential gender disparity (overrides)")
+            if orr is not None and orr >= 0.25:
+                flags.append("Potential region disparity (overrides)")
+        else:
+            flags.append("Not enough decided cases (need >= 10)")
+
+        out.append(
+            {
+                "judge_user_id": int(j["id"]),
+                "username": j["username"],
+                "full_name": j["full_name"],
+                "decided_cases": decided,
+                "agreement_rate": (agree / decided) if decided else None,
+                "disagreement_rate": (disagree / decided) if decided else None,
+                "grant_rate_disparity_gender": _rate_disparity(grant_gender),
+                "grant_rate_disparity_region": _rate_disparity(grant_region),
+                "override_disparity_gender": _rate_disparity(override_gender),
+                "override_disparity_region": _rate_disparity(override_region),
+                "flags": flags,
+            }
+        )
+
+    return {"judges": out}
+
+
 
 # Root test
 
@@ -309,67 +805,184 @@ REQUIRED_COLS = [
 @app.post("/predict")
 def predict(payload: dict, _current_user: UserPublic = Depends(require_role("court_authority"))):
     try:
-        # 1) Start with NaN everywhere
-        row = {col: np.nan for col in REQUIRED_COLS}
+        REQUIRED_COLS = [
+            "legal_principles_discussed", "accused_gender", "region", "legal_text",
+            "ipc_sections", "facts", "date", "bail_cancellation_case", "summary",
+            "legal_issues", "crime_type", "prior_cases", "bail_outcome_label_detailed",
+            "court", "judgment_reason", "landmark_case", "special_laws", "bail_type",
+            "bias_flag", "parity_argument_used", "judge"
+        ]
 
-        # 2) Overwrite with incoming values
-        for k, v in payload.items():
-            row[k] = v
+        DEFAULTS = {
+            "legal_principles_discussed": "",
+            "ipc_sections": "",
+            "bail_cancellation_case": 0,
+            "summary": "",
+            "legal_issues": "",
+            "crime_type": "",
+            "prior_cases": 0,
+            "bail_outcome_label_detailed": 0,
+            "court": "",
+            "judgment_reason": "",
+            "landmark_case": "",
+            "special_laws": "",
+            "bail_type": "",
+            "bias_flag": 0,
+            "parity_argument_used": 0,
+            "judge": "",
+        }
 
-        # 3) Replace "" with NaN
+        # Build clean row
+        row = {}
+
         for col in REQUIRED_COLS:
-            if row.get(col) == "":
-                row[col] = np.nan
+            value = payload.get(col, DEFAULTS.get(col, ""))
 
-        TEXT_COLS = ["facts", "legal_issues", "judgment_reason", "summary", "legal_text"]
+            # Replace empty strings with None
+            if value == "":
+                value = None
 
+            row[col] = value
 
-        for col in TEXT_COLS:
-            val = row.get(col, np.nan)
-            if val is None or (isinstance(val, float) and np.isnan(val)):
-                row[col] = ""
-            else:
-                row[col] = str(val)
+        # Build legal_text safely
+        row["legal_text"] = " ".join([
+            str(row.get("facts") or ""),
+            str(row.get("legal_issues") or ""),
+            str(row.get("judgment_reason") or ""),
+            str(row.get("summary") or "")
+        ]).strip()
 
-        # 6) Build legal_text 
-        row["legal_text"] = (
-            f"{row.get('facts','')} "
-            f"{row.get('legal_issues','')} "
-            f"{row.get('judgment_reason','')} "
-            f"{row.get('summary','')}"
-        ).strip()
+        case_df = pd.DataFrame([row])
 
-        # 7) Create dataframe with correct order
-        case_df = pd.DataFrame([row])[REQUIRED_COLS]
+        # 🔥 FORCE NUMERIC TYPES SAFELY
+        numeric_cols = [
+            "prior_cases",
+            "bail_cancellation_case",
+            "bias_flag",
+            "parity_argument_used",
+            "bail_outcome_label_detailed"
+        ]
 
+        for col in numeric_cols:
+            case_df[col] = pd.to_numeric(case_df[col], errors="coerce")
+            case_df[col] = case_df[col].fillna(0)
+            case_df[col] = case_df[col].astype("float64")
 
-        non_text_cols = [c for c in REQUIRED_COLS if c not in TEXT_COLS]
-        for c in non_text_cols:
-            case_df[c] = pd.to_numeric(case_df[c], errors="coerce")
-
-        # 9) Predict
         proba = model.predict_proba(case_df)[0]
         pred = int(proba[1] >= 0.5)
 
-        return {
+        # ---- SHAP explanation (best-effort) ----
+        top_features = []
+        shap_error = None
+        try:
+            shap_df = sanitize_for_shap(case_df)
+            explainer = get_shap_explainer(shap_df)
+            if explainer is not None:
+                X_explain = shap_df
+                if shap_use_transform and shap_preprocessor is not None:
+                    X_explain = shap_preprocessor.transform(shap_df)
+                    if hasattr(X_explain, "toarray"):
+                        X_explain = X_explain.toarray()
+                    X_explain = np.asarray(X_explain, dtype=np.float32)
+
+                # TreeExplainer works best with shap_values API (binary -> list or array)
+                if hasattr(explainer, "shap_values"):
+                    sv = explainer.shap_values(X_explain)
+                    if isinstance(sv, list):
+                        arr = np.array(sv[1] if len(sv) > 1 else sv[0])
+                    else:
+                        arr = np.array(sv)
+                else:
+                    shap_values = explainer(X_explain)
+                    values = getattr(shap_values, "values", shap_values)
+                    arr = np.array(values)
+
+                # Handle common SHAP output shapes
+                if arr.ndim == 2:
+                    row_vals = arr[0]
+                elif arr.ndim == 3:
+                    # [samples, classes, features] -> pick positive class (1) if available
+                    class_idx = 1 if arr.shape[1] > 1 else 0
+                    row_vals = arr[0, class_idx, :]
+                else:
+                    row_vals = arr.reshape(-1)
+
+                feature_names = list(shap_feature_names) if shap_feature_names else list(shap_df.columns)
+                contribs = [
+                    {
+                        "feature": feature_names[i],
+                        "weight": float(row_vals[i]),
+                    }
+                    for i in range(min(len(feature_names), len(row_vals)))
+                ]
+                contribs.sort(key=lambda x: abs(x["weight"]), reverse=True)
+                top_features = contribs[:10]
+            else:
+                shap_error = shap_init_error or "SHAP explainer could not be initialized for this model."
+        except Exception as e:
+            shap_error = str(e)
+            top_features = []
+
+        result = {
             "decision": "Bail Granted" if pred == 1 else "Bail Rejected",
             "confidence": round(float(max(proba)), 3),
             "prob_granted": round(float(proba[1]), 3),
             "prob_rejected": round(float(proba[0]), 3),
-            "received_keys": list(payload.keys()),
+            "top_features": top_features,
+            "shap_error": shap_error,
         }
 
-    except Exception as e:
-
+        # Persist case + prediction (best-effort; won't fail prediction if DB insert fails)
         try:
-            bad = {}
-            for col in REQUIRED_COLS:
-                val = row.get(col, None)
-                if isinstance(val, str) and col not in TEXT_COLS:
-                    bad[col] = val
-            return {"error": str(e), "received_keys": list(payload.keys()), "non_numeric_strings": bad}
-        except:
-            return {"error": str(e), "received_keys": list(payload.keys())}
+            conn = _get_db_conn()
+            try:
+                now = datetime.now(timezone.utc).isoformat()
+                payload_json = json.dumps(payload)
+                cur = conn.execute(
+                    """
+                    INSERT INTO cases (created_at, created_by_user_id, payload_json, accused_gender, region, court, date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        now,
+                        int(_current_user.id),
+                        payload_json,
+                        str(payload.get("accused_gender") or ""),
+                        str(payload.get("region") or ""),
+                        str(payload.get("court") or ""),
+                        str(payload.get("date") or ""),
+                    ),
+                )
+                case_id = int(cur.lastrowid)
+
+                conn.execute(
+                    """
+                    INSERT INTO ai_predictions (case_id, created_at, decision, confidence, prob_granted, prob_rejected, shap_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        case_id,
+                        now,
+                        result["decision"],
+                        float(result["confidence"]),
+                        float(result["prob_granted"]),
+                        float(result["prob_rejected"]),
+                        json.dumps(result.get("top_features") or []),
+                    ),
+                )
+                conn.commit()
+                result["case_id"] = case_id
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+        return result
+
+        
+
+    except Exception as e:
+        return {"error": str(e)}
 # AUDIT MODE
 
 @app.get("/audit-report")

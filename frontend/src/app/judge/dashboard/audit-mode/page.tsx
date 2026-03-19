@@ -17,6 +17,8 @@ type AuditReport = {
 export default function AuditModePage() {
   const [report, setReport] = useState<AuditReport | null>(null);
   const [loading, setLoading] = useState(true);
+  const [judgeMetrics, setJudgeMetrics] = useState<any>(null);
+  const [metricsErr, setMetricsErr] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchAudit = async () => {
@@ -47,6 +49,20 @@ export default function AuditModePage() {
     };
 
     fetchAudit();
+  }, []);
+
+  useEffect(() => {
+    const fetchJudgeMetrics = async () => {
+      try {
+        const res = await apiFetch("/judge/metrics/me", { cache: "no-store" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.detail || "Failed to fetch judge metrics");
+        setJudgeMetrics(data);
+      } catch (e) {
+        setMetricsErr(e instanceof Error ? e.message : "Unknown error");
+      }
+    };
+    fetchJudgeMetrics();
   }, []);
 
   const getStatusColor = (status: string) => {
@@ -166,6 +182,81 @@ export default function AuditModePage() {
             ))}
           </div>
         )}
+
+        <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-8">
+          <h2 className="text-xl font-semibold text-white">Judge vs AI Audit</h2>
+          {metricsErr && <p className="mt-2 text-sm text-red-400">{metricsErr}</p>}
+          {!metricsErr && !judgeMetrics && <p className="mt-2 text-sm text-slate-300">Loading judge metrics...</p>}
+          {judgeMetrics && (
+            <>
+              <div className="mt-4 grid gap-4 md:grid-cols-3">
+                <div className="rounded-lg border border-white/10 bg-slate-800/40 p-4">
+                  <p className="text-xs text-slate-400">Cases with AI</p>
+                  <p className="mt-1 text-2xl font-bold">{judgeMetrics.total_cases_with_ai}</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-slate-800/40 p-4">
+                  <p className="text-xs text-slate-400">Decisions submitted</p>
+                  <p className="mt-1 text-2xl font-bold">{judgeMetrics.decided_cases}</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-slate-800/40 p-4">
+                  <p className="text-xs text-slate-400">Agreement rate</p>
+                  <p className="mt-1 text-2xl font-bold">
+                    {judgeMetrics.agreement_rate == null ? "N/A" : `${Math.round(judgeMetrics.agreement_rate * 100)}%`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-6 rounded-lg border border-white/10 bg-slate-800/30 p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-400">Disparity signals (your decisions)</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <div className="rounded-lg border border-white/10 bg-slate-900/30 p-3">
+                    <p className="text-xs text-slate-400">Grant-rate disparity (gender)</p>
+                    <p className="mt-1 text-lg font-semibold text-white">
+                      {judgeMetrics.judge_grant_rate_disparity_gender == null
+                        ? "N/A"
+                        : `${Math.round(judgeMetrics.judge_grant_rate_disparity_gender * 100)}pp`}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-slate-900/30 p-3">
+                    <p className="text-xs text-slate-400">Grant-rate disparity (region)</p>
+                    <p className="mt-1 text-lg font-semibold text-white">
+                      {judgeMetrics.judge_grant_rate_disparity_region == null
+                        ? "N/A"
+                        : `${Math.round(judgeMetrics.judge_grant_rate_disparity_region * 100)}pp`}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-slate-900/30 p-3">
+                    <p className="text-xs text-slate-400">Override disparity (gender)</p>
+                    <p className="mt-1 text-lg font-semibold text-white">
+                      {judgeMetrics.override_disparity_gender == null
+                        ? "N/A"
+                        : `${Math.round(judgeMetrics.override_disparity_gender * 100)}pp`}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-slate-900/30 p-3">
+                    <p className="text-xs text-slate-400">Override disparity (region)</p>
+                    <p className="mt-1 text-lg font-semibold text-white">
+                      {judgeMetrics.override_disparity_region == null
+                        ? "N/A"
+                        : `${Math.round(judgeMetrics.override_disparity_region * 100)}pp`}
+                    </p>
+                  </div>
+                </div>
+
+                {Array.isArray(judgeMetrics.flags) && judgeMetrics.flags.length > 0 && (
+                  <div className="mt-4">
+                    <p className="text-xs text-slate-400">Flags</p>
+                    <ul className="mt-2 list-disc list-inside text-sm text-amber-200">
+                      {judgeMetrics.flags.map((f: string, i: number) => (
+                        <li key={i}>{f}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -2,14 +2,18 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { apiFetch } from "@/lib/api";
 
 type PredictResponse =
   | {
       decision: string;
-      confidence: number; 
+      confidence: number;
       prob_granted: number;
       prob_rejected: number;
       received_keys: string[];
+      top_features?: { feature: string; weight: number }[]; // new model explanation
+      shap_error?: string | null;
+      case_id?: number;
     }
   | { error: string; received_keys?: string[] };
 
@@ -25,20 +29,53 @@ type LastPayload = {
   judgment_reason?: string;
   summary?: string;
 };
+
 export default function AIJudgeModePage() {
   const [result, setResult] = useState<PredictResponse | null>(null);
   const [payload, setPayload] = useState<LastPayload | null>(null);
+  const [caseId, setCaseId] = useState<number | null>(null);
+  const [judgeDecision, setJudgeDecision] = useState<"Bail Granted" | "Bail Rejected" | "">("");
+  const [judgeNotes, setJudgeNotes] = useState("");
+  const [savingDecision, setSavingDecision] = useState(false);
+  const [decisionSavedMsg, setDecisionSavedMsg] = useState<string | null>(null);
+  const [decisionErr, setDecisionErr] = useState<string | null>(null);
 
   // Read prediction result + payload from sessionStorage
   useEffect(() => {
-  const stored = sessionStorage.getItem("ai_judge_prediction_result");
-  const storedPayload = sessionStorage.getItem("ai_judge_last_payload");
+    const stored = sessionStorage.getItem("ai_judge_prediction_result");
+    const storedPayload = sessionStorage.getItem("ai_judge_last_payload");
+    const storedCaseId =
+      sessionStorage.getItem("ai_judge_last_case_id") ||
+      localStorage.getItem("ai_judge_last_case_id");
 
-  setTimeout(() => {
-    if (stored) setResult(JSON.parse(stored));
-    if (storedPayload) setPayload(JSON.parse(storedPayload));
-  }, 0);
-}, []);
+    setTimeout(() => {
+      if (stored) setResult(JSON.parse(stored));
+      if (storedPayload) setPayload(JSON.parse(storedPayload));
+      if (storedCaseId) setCaseId(Number(storedCaseId));
+    }, 0);
+  }, []);
+
+  const submitJudgeDecision = async () => {
+    if (!caseId || !judgeDecision) return;
+    setSavingDecision(true);
+    setDecisionErr(null);
+    setDecisionSavedMsg(null);
+    try {
+      const res = await apiFetch("/judge/decision", {
+        method: "POST",
+        body: JSON.stringify({ case_id: caseId, decision: judgeDecision, notes: judgeNotes || null }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.detail || "Failed to save decision");
+      }
+      setDecisionSavedMsg("Decision saved.");
+    } catch (e) {
+      setDecisionErr(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setSavingDecision(false);
+    }
+  };
 
   const getConfidenceColor = (confidencePercent: number) => {
     if (confidencePercent >= 85) return "text-emerald-400";
@@ -58,36 +95,8 @@ export default function AIJudgeModePage() {
     return Math.round((result.confidence ?? 0) * 100);
   }, [result]);
 
-  // Build ONE "recent case" item using the prediction result 
   const recentCases = useMemo(() => {
-    if (!result) {
-      return [
-        {
-          id: "C-2024-001",
-          title: "Contract Dispute - Employment",
-          status: "Pending Review",
-          aiRecommendation: "Neutral",
-          confidence: 87,
-          biasScore: 2.1,
-        },
-        {
-          id: "C-2024-002",
-          title: "Property Rights Case",
-          status: "Under Analysis",
-          aiRecommendation: "Favor Plaintiff",
-          confidence: 73,
-          biasScore: 3.4,
-        },
-        {
-          id: "C-2024-003",
-          title: "Family Law - Custody",
-          status: "Ready for Decision",
-          aiRecommendation: "Neutral",
-          confidence: 92,
-          biasScore: 1.9,
-        },
-      ];
-    }
+    if (!result) return [];
 
     if ("error" in result) {
       return [
@@ -98,6 +107,9 @@ export default function AIJudgeModePage() {
           aiRecommendation: "N/A",
           confidence: 0,
           biasScore: 0,
+          prob_granted: 0,
+          prob_rejected: 0,
+          top_features: [],
         },
       ];
     }
@@ -109,10 +121,8 @@ export default function AIJudgeModePage() {
         ? `Case Type: ${String(payload.crime_type)}`
         : "Submitted Case");
 
-
     const aiRecommendation =
       result.decision === "Bail Granted" ? "Grant Bail" : "Reject Bail";
-
 
     const dummyBiasScore = 2.5;
 
@@ -122,16 +132,21 @@ export default function AIJudgeModePage() {
         title: String(title),
         status: "Ready for Decision",
         aiRecommendation,
-        confidence: Math.max(0, Math.min(100, Math.round((result.confidence ?? 0) * 100))),
+        confidence: Math.max(
+          0,
+          Math.min(100, Math.round((result.confidence ?? 0) * 100))
+        ),
         biasScore: dummyBiasScore,
+        prob_granted: Math.round((result.prob_granted ?? 0) * 100),
+        prob_rejected: Math.round((result.prob_rejected ?? 0) * 100),
+        top_features: result.top_features ?? [],
       },
     ];
   }, [result, payload]);
 
-
   const activeCasesCount = 12; // dummy
   const avgConfidenceText =
-    confidencePercent !== null ? `${confidencePercent}%` : "84%"; 
+    confidencePercent !== null ? `${confidencePercent}%` : "84%";
   const biasAlertCount = 0; // dummy
 
   return (
@@ -154,6 +169,7 @@ export default function AIJudgeModePage() {
           </div>
         </div>
 
+        {/* Top Summary Cards */}
         <div className="grid gap-6 md:grid-cols-3">
           <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-6 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur">
             <p className="text-xs font-semibold uppercase tracking-[0.3em] text-sky-300">
@@ -180,19 +196,16 @@ export default function AIJudgeModePage() {
           </div>
         </div>
 
+        {/* Recent Cases */}
         <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-8 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur">
-          <h2 className="text-xl font-semibold text-white">
-            Recent Cases with AI Analysis
-          </h2>
+          <h2 className="text-xl font-semibold text-white">Recent Cases with AI Analysis</h2>
 
-          
           {!result && (
             <p className="mt-2 text-sm text-slate-400">
               No submitted case result found yet. Submit a case from Court Authority → Input Data.
             </p>
           )}
 
-         
           {result && "error" in result && (
             <p className="mt-2 text-sm text-red-400">
               Backend error: {result.error}
@@ -208,103 +221,136 @@ export default function AIJudgeModePage() {
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <div className="flex items-center gap-3">
-                      <h3 className="font-semibold text-white">
-                        {caseItem.title}
-                      </h3>
+                      <h3 className="font-semibold text-white">{caseItem.title}</h3>
                       <span className="rounded-full bg-sky-400/20 px-3 py-1 text-xs font-semibold text-sky-300">
                         {caseItem.id}
                       </span>
                     </div>
-                    <p className="mt-2 text-sm text-slate-300">
-                      Status: {caseItem.status}
-                    </p>
+
+                    <p className="mt-2 text-sm text-slate-300">Status: {caseItem.status}</p>
+
                     <div className="mt-4 flex gap-6">
                       <div>
                         <p className="text-xs text-slate-400">AI Recommendation</p>
-                        <p className="mt-1 font-semibold text-white">
-                          {caseItem.aiRecommendation}
-                        </p>
+                        <p className="mt-1 font-semibold text-white">{caseItem.aiRecommendation}</p>
                       </div>
+
                       <div>
                         <p className="text-xs text-slate-400">Confidence</p>
-                        <p
-                          className={`mt-1 font-semibold ${getConfidenceColor(caseItem.confidence)}`}
-                        >
+                        <p className={`mt-1 font-semibold ${getConfidenceColor(caseItem.confidence)}`}>
                           {caseItem.confidence}%
                         </p>
                       </div>
+
                       <div>
                         <p className="text-xs text-slate-400">Bias Score</p>
-                        <p
-                          className={`mt-1 font-semibold ${getBiasColor(caseItem.biasScore)}`}
-                        >
+                        <p className={`mt-1 font-semibold ${getBiasColor(caseItem.biasScore)}`}>
                           {caseItem.biasScore.toFixed(1)}
                         </p>
                       </div>
                     </div>
+
+                    {/* Probability Breakdown */}
+                    {result && !("error" in result) && (
+                      <div className="mt-6 space-y-3">
+                        <p className="text-xs uppercase tracking-wide text-slate-400">
+                          Probability Breakdown
+                        </p>
+
+                        <div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-slate-300">Bail Granted</span>
+                            <span className="text-emerald-400 font-semibold">{caseItem.prob_granted}%</span>
+                          </div>
+                          <div className="mt-1 h-3 w-full rounded-full bg-slate-700">
+                            <div
+                              className="h-3 rounded-full bg-emerald-500 transition-all"
+                              style={{ width: `${caseItem.prob_granted}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-slate-300">Bail Rejected</span>
+                            <span className="text-red-400 font-semibold">{caseItem.prob_rejected}%</span>
+                          </div>
+                          <div className="mt-1 h-3 w-full rounded-full bg-slate-700">
+                            <div
+                              className="h-3 rounded-full bg-red-500 transition-all"
+                              style={{ width: `${caseItem.prob_rejected}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Model Explanation (Top Features) */}
+                    {caseItem.top_features && caseItem.top_features.length > 0 && (
+                      <div className="mt-6">
+                        <p className="text-xs uppercase tracking-wide text-slate-400">Top Features Influencing Prediction</p>
+                        <ul className="mt-2 list-disc list-inside text-sm text-slate-300">
+                          {caseItem.top_features.slice(0, 5).map((f, idx) => (
+                            <li key={idx}>
+                              <span className="text-white font-medium">{f.feature}</span>: {f.weight.toFixed(3)}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* SHAP error (debug) */}
+                    {result && !("error" in result) && (!caseItem.top_features || caseItem.top_features.length === 0) && result.shap_error && (
+                      <p className="mt-4 text-xs text-amber-300">
+                        Explanation unavailable: {result.shap_error}
+                      </p>
+                    )}
+
+                    {/* Judge decision capture */}
+                    {caseId && (
+                      <div className="mt-6 rounded-lg border border-white/10 bg-slate-900/30 p-4">
+                        <p className="text-xs uppercase tracking-wide text-slate-400">Judge Decision</p>
+                        <div className="mt-3 flex flex-wrap items-center gap-3">
+                          <select
+                            value={judgeDecision}
+                            onChange={(e) => setJudgeDecision(e.target.value as any)}
+                            className="rounded-lg border border-white/20 bg-slate-800/40 px-3 py-2 text-sm text-white focus:border-sky-400 focus:outline-none"
+                          >
+                            <option value="">Select decision…</option>
+                            <option value="Bail Granted">Bail Granted</option>
+                            <option value="Bail Rejected">Bail Rejected</option>
+                          </select>
+                          <button
+                            type="button"
+                            onClick={submitJudgeDecision}
+                            disabled={!judgeDecision || savingDecision}
+                            className="rounded-lg border border-sky-400/30 bg-sky-400/10 px-4 py-2 text-sm font-semibold text-sky-300 transition hover:bg-sky-400/20 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {savingDecision ? "Saving..." : "Save decision"}
+                          </button>
+                          <span className="text-xs text-slate-400">Case ID: {caseId}</span>
+                        </div>
+
+                        <textarea
+                          value={judgeNotes}
+                          onChange={(e) => setJudgeNotes(e.target.value)}
+                          rows={3}
+                          placeholder="Optional notes / reasoning"
+                          className="mt-3 w-full rounded-lg border border-white/20 bg-slate-800/40 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-sky-400 focus:outline-none"
+                        />
+
+                        {decisionSavedMsg && <p className="mt-2 text-xs text-emerald-300">{decisionSavedMsg}</p>}
+                        {decisionErr && <p className="mt-2 text-xs text-red-300">{decisionErr}</p>}
+                      </div>
+                    )}
                   </div>
+
                   <button className="ml-4 rounded-lg border border-sky-400/30 bg-sky-400/10 px-4 py-2 text-sm font-semibold text-sky-300 transition hover:bg-sky-400/20">
                     View Details
                   </button>
                 </div>
               </div>
             ))}
-          </div>
-        </div>
-
-       
-        <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-8 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur">
-          <h2 className="text-xl font-semibold text-white">
-            AI Analysis Tools
-          </h2>
-          <div className="mt-6 grid gap-4 md:grid-cols-2">
-            <button className="flex items-center justify-between rounded-lg border border-white/10 bg-slate-800/40 p-4 transition hover:border-sky-400/50 hover:bg-slate-800/60">
-              <div>
-                <p className="font-semibold text-white">Case Analyzer</p>
-                <p className="text-sm text-slate-400">
-                  Upload case documents for AI analysis
-                </p>
-              </div>
-              <svg className="h-5 w-5 text-sky-300" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-
-            <button className="flex items-center justify-between rounded-lg border border-white/10 bg-slate-800/40 p-4 transition hover:border-sky-400/50 hover:bg-slate-800/60">
-              <div>
-                <p className="font-semibold text-white">Precedent Search</p>
-                <p className="text-sm text-slate-400">
-                  Find similar cases and rulings
-                </p>
-              </div>
-              <svg className="h-5 w-5 text-sky-300" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-
-            <button className="flex items-center justify-between rounded-lg border border-white/10 bg-slate-800/40 p-4 transition hover:border-sky-400/50 hover:bg-slate-800/60">
-              <div>
-                <p className="font-semibold text-white">Bias Checker</p>
-                <p className="text-sm text-slate-400">
-                  Real-time bias detection for decisions
-                </p>
-              </div>
-              <svg className="h-5 w-5 text-sky-300" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-
-            <button className="flex items-center justify-between rounded-lg border border-white/10 bg-slate-800/40 p-4 transition hover:border-sky-400/50 hover:bg-slate-800/60">
-              <div>
-                <p className="font-semibold text-white">Decision Assistant</p>
-                <p className="text-sm text-slate-400">
-                  Get AI-powered decision recommendations
-                </p>
-              </div>
-              <svg className="h-5 w-5 text-sky-300" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
           </div>
         </div>
       </div>

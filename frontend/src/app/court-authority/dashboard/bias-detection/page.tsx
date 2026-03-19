@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { jsPDF } from "jspdf";
 
 import { apiFetch } from "@/lib/api";
 
@@ -17,6 +18,9 @@ type AuditReport = {
 export default function BiasDetectionPage() {
   const [report, setReport] = useState<AuditReport | null>(null);
   const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [judgeTable, setJudgeTable] = useState<any[] | null>(null);
+  const [judgeTableErr, setJudgeTableErr] = useState<string | null>(null);
 
 
   useEffect(() => {
@@ -49,6 +53,20 @@ export default function BiasDetectionPage() {
     };
 
     fetchAudit();
+  }, []);
+
+  useEffect(() => {
+    const fetchJudges = async () => {
+      try {
+        const res = await apiFetch("/authority/metrics/judges", { cache: "no-store" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.detail || "Failed to fetch judge table");
+        setJudgeTable(Array.isArray(data?.judges) ? data.judges : []);
+      } catch (e) {
+        setJudgeTableErr(e instanceof Error ? e.message : "Unknown error");
+      }
+    };
+    fetchJudges();
   }, []);
 
   const getStatusColor = (status: string) => {
@@ -121,6 +139,99 @@ export default function BiasDetectionPage() {
     { name: "Northern Circuit Court", biasScore: 3.2, cases: 456, status: "Moderate Risk" },
     { name: "Southern Bench", biasScore: 2.9, cases: 312, status: "Low Risk" },
   ];
+
+  const generateFullReport = async () => {
+    setGenerating(true);
+    try {
+      const now = new Date();
+      const ts = now.toISOString();
+
+      const storedPred =
+        sessionStorage.getItem("ai_judge_prediction_result") ||
+        localStorage.getItem("ai_judge_prediction_result");
+      const storedPayload =
+        sessionStorage.getItem("ai_judge_last_payload") ||
+        localStorage.getItem("ai_judge_last_payload");
+
+      const pred = storedPred ? (JSON.parse(storedPred) as any) : null;
+      const payload = storedPayload ? (JSON.parse(storedPayload) as any) : null;
+
+      const lines: string[] = [];
+      lines.push(`AI for Fairness — Full Report`);
+      lines.push(`Generated: ${ts}`);
+      lines.push("");
+
+      lines.push(`Bias Detection (System-wide)`);
+      if (!report || report.error) {
+        lines.push(`Status: unavailable`);
+        lines.push(`Error: ${report?.error ?? "No report loaded"}`);
+      } else {
+        lines.push(`Bias Level: ${report["Bias Level"]}`);
+        lines.push(`Bias Score: ${report["Bias Score"]}`);
+        lines.push(`DP: ${report.DP}`);
+        lines.push(`EO: ${report.EO}`);
+        lines.push(`Cases used: ${report.cases_used}`);
+      }
+      lines.push("");
+
+      lines.push(`Latest AI Judge Case Analysis`);
+      if (!pred || pred.error) {
+        lines.push(`Status: unavailable`);
+        lines.push(`Error: ${pred?.error ?? "No prediction stored yet"}`);
+      } else {
+        lines.push(`Decision: ${pred.decision ?? "N/A"}`);
+        lines.push(`Confidence: ${pred.confidence ?? "N/A"}`);
+        lines.push(`P(Bail Granted): ${pred.prob_granted ?? "N/A"}`);
+        lines.push(`P(Bail Rejected): ${pred.prob_rejected ?? "N/A"}`);
+        if (payload) {
+          lines.push("");
+          lines.push(`Case Inputs (latest)`);
+          for (const [k, v] of Object.entries(payload)) {
+            lines.push(`- ${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`);
+          }
+        }
+
+        const feats = Array.isArray(pred.top_features) ? pred.top_features : [];
+        lines.push("");
+        lines.push(`Top Features Influencing Prediction (SHAP)`);
+        if (feats.length === 0) {
+          lines.push(`(No SHAP features available)`);
+          if (pred.shap_error) lines.push(`SHAP error: ${pred.shap_error}`);
+        } else {
+          for (const f of feats.slice(0, 10)) {
+            lines.push(`- ${f.feature}: ${Number(f.weight).toFixed(3)}`);
+          }
+        }
+      }
+
+      const doc = new jsPDF({ unit: "pt", format: "a4" });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 48;
+      const maxWidth = pageWidth - margin * 2;
+      const lineHeight = 14;
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(11);
+
+      const text = lines.join("\n");
+      const wrapped = doc.splitTextToSize(text, maxWidth);
+
+      let y = margin;
+      for (const line of wrapped) {
+        if (y > pageHeight - margin) {
+          doc.addPage();
+          y = margin;
+        }
+        doc.text(line, margin, y);
+        y += lineHeight;
+      }
+
+      doc.save(`ai-for-fairness-full-report-${now.toISOString().replace(/[:.]/g, "-")}.pdf`);
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 text-white">
@@ -275,16 +386,78 @@ export default function BiasDetectionPage() {
             Export & Reports
           </h2>
           <div className="mt-6 flex flex-wrap gap-4">
-            <button className="rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-6 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-400/20">
-              Generate Full Report
-            </button>
-            <button className="rounded-lg border border-white/20 bg-slate-800/40 px-6 py-3 text-sm font-semibold text-white transition hover:bg-slate-800/60">
-              Export CSV Data
-            </button>
-            <button className="rounded-lg border border-white/20 bg-slate-800/40 px-6 py-3 text-sm font-semibold text-white transition hover:bg-slate-800/60">
-              Schedule Report
+            <button
+              onClick={generateFullReport}
+              disabled={generating}
+              className="rounded-lg border border-emerald-400/30 bg-emerald-10 px-6 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {generating ? "Generating..." : "Generate Full Report"}
             </button>
           </div>
+        </div>
+
+        <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-8 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur">
+          <h2 className="text-xl font-semibold text-white">Judge vs AI Overview</h2>
+          {judgeTableErr && <p className="mt-2 text-sm text-red-400">{judgeTableErr}</p>}
+          {!judgeTableErr && !judgeTable && <p className="mt-2 text-sm text-slate-300">Loading judge stats...</p>}
+          {judgeTable && (
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full min-w-[980px] text-sm">
+                <thead className="text-slate-300">
+                  <tr className="border-b border-white/10">
+                    <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Judge</th>
+                    <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Decided</th>
+                    <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Agreement</th>
+                    <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Disagreement</th>
+                    <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Grant Δ gender</th>
+                    <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Grant Δ region</th>
+                    <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Override Δ gender</th>
+                    <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Override Δ region</th>
+                    <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Flags</th>
+                  </tr>
+                </thead>
+                <tbody className="text-slate-200">
+                  {judgeTable.map((j) => (
+                    <tr key={j.judge_user_id} className="border-b border-white/5">
+                      <td className="px-3 py-3">
+                        <div className="font-medium text-white">{j.full_name || j.username}</div>
+                        <div className="text-xs text-slate-400">{j.username}</div>
+                      </td>
+                      <td className="px-3 py-3 whitespace-nowrap">{j.decided_cases}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">
+                        {j.agreement_rate == null ? "N/A" : `${Math.round(j.agreement_rate * 100)}%`}
+                      </td>
+                      <td className="px-3 py-3 whitespace-nowrap">
+                        {j.disagreement_rate == null ? "N/A" : `${Math.round(j.disagreement_rate * 100)}%`}
+                      </td>
+                      <td className="px-3 py-3 whitespace-nowrap">
+                        {j.grant_rate_disparity_gender == null ? "N/A" : `${Math.round(j.grant_rate_disparity_gender * 100)}pp`}
+                      </td>
+                      <td className="px-3 py-3 whitespace-nowrap">
+                        {j.grant_rate_disparity_region == null ? "N/A" : `${Math.round(j.grant_rate_disparity_region * 100)}pp`}
+                      </td>
+                      <td className="px-3 py-3 whitespace-nowrap">
+                        {j.override_disparity_gender == null ? "N/A" : `${Math.round(j.override_disparity_gender * 100)}pp`}
+                      </td>
+                      <td className="px-3 py-3 whitespace-nowrap">
+                        {j.override_disparity_region == null ? "N/A" : `${Math.round(j.override_disparity_region * 100)}pp`}
+                      </td>
+                      <td className="px-3 py-3 text-xs text-amber-200">
+                        {Array.isArray(j.flags) && j.flags.length > 0 ? j.flags.join("; ") : ""}
+                      </td>
+                    </tr>
+                  ))}
+                  {judgeTable.length === 0 && (
+                    <tr>
+                      <td className="px-3 py-3 text-slate-400" colSpan={9}>
+                        No judge decisions recorded yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
     </div>
