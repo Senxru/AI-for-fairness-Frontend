@@ -32,7 +32,7 @@ app.add_middleware(
 )
 
 
-model = joblib.load("ai_judge_model retrained.pkl")
+model = joblib.load("ai_judge_model (9).pkl")
 
 # SHAP explainer (initialized lazily on first prediction)
 shap_explainer = None
@@ -685,6 +685,7 @@ def authority_metrics_judges(
             SELECT
                 c.accused_gender as accused_gender,
                 c.region as region,
+                p.confidence as ai_confidence,
                 p.decision as ai_decision,
                 jd.decision as judge_decision
             FROM cases c
@@ -715,6 +716,7 @@ def authority_metrics_judges(
                 counts[bucket]["decided"] += 1
                 if r["judge_decision"] == "Bail Granted":
                     counts[bucket]["granted"] += 1
+
             out_rates = {}
             for b, c in counts.items():
                 if c["decided"] >= MIN_GROUP:
@@ -733,6 +735,7 @@ def authority_metrics_judges(
                 counts[bucket]["decided"] += 1
                 if r["judge_decision"] != r["ai_decision"]:
                     counts[bucket]["override"] += 1
+
             out_rates = {}
             for b, c in counts.items():
                 if c["decided"] >= MIN_GROUP:
@@ -741,17 +744,48 @@ def authority_metrics_judges(
                     out_rates[b] = None
             return out_rates
 
-        grant_gender = _grant_rates_by("accused_gender")
-        grant_region = _grant_rates_by("region")
-        override_gender = _override_rates_by("accused_gender")
-        override_region = _override_rates_by("region")
+        grant_rate_by_gender = _grant_rates_by("accused_gender")
+        grant_rate_by_region = _grant_rates_by("region")
+        override_rate_by_gender = _override_rates_by("accused_gender")
+        override_rate_by_region = _override_rates_by("region")
+
+        grant_rate_disparity_gender = _rate_disparity(grant_rate_by_gender)
+        grant_rate_disparity_region = _rate_disparity(grant_rate_by_region)
+        override_disparity_gender = _rate_disparity(override_rate_by_gender)
+        override_disparity_region = _rate_disparity(override_rate_by_region)
+
+        # Confidence disparity by group (judge-aligned confidence differences)
+        def _confidence_avgs_by(key: str) -> dict:
+            buckets: dict[str, dict[str, float | int]] = {}
+            for r in rows:
+                bucket = (r[key] or "unknown").strip() if isinstance(r[key], str) else (r[key] or "unknown")
+                if bucket == "":
+                    bucket = "unknown"
+                if bucket not in buckets:
+                    buckets[bucket] = {"count": 0, "sum_conf": 0.0}
+                # only include decided cases (rows already come from judge_decisions, so judge_decision is non-null)
+                buckets[bucket]["count"] = buckets[bucket]["count"] + 1
+                buckets[bucket]["sum_conf"] = buckets[bucket]["sum_conf"] + float(r["ai_confidence"] or 0.0)
+            out_avgs: dict[str, float | None] = {}
+            for b, c in buckets.items():
+                decided_in_bucket = int(c["count"])
+                if decided_in_bucket >= MIN_GROUP and decided_in_bucket > 0:
+                    out_avgs[b] = float(c["sum_conf"]) / float(decided_in_bucket)
+                else:
+                    out_avgs[b] = None
+            return out_avgs
+
+        confidence_avg_by_gender = _confidence_avgs_by("accused_gender")
+        confidence_avg_by_region = _confidence_avgs_by("region")
+        confidence_disparity_gender = _rate_disparity(confidence_avg_by_gender)
+        confidence_disparity_region = _rate_disparity(confidence_avg_by_region)
 
         flags: list[str] = []
         if decided >= 10:
-            dg = _rate_disparity(grant_gender)
-            dr = _rate_disparity(grant_region)
-            og = _rate_disparity(override_gender)
-            orr = _rate_disparity(override_region)
+            dg = grant_rate_disparity_gender
+            dr = grant_rate_disparity_region
+            og = override_disparity_gender
+            orr = override_disparity_region
             if dg is not None and dg >= 0.2:
                 flags.append("Potential gender disparity (grant rate)")
             if dr is not None and dr >= 0.2:
@@ -763,6 +797,42 @@ def authority_metrics_judges(
         else:
             flags.append("Not enough decided cases (need >= 10)")
 
+        # Severity for UI coloring
+        bias_level = "none"  # none | normal | high
+        bias_reasons: list[str] = []
+        if decided < 10:
+            bias_level = "normal"
+            bias_reasons = ["Not enough decided cases to make a bias judgement (need >= 10)"]
+        else:
+            conf_bad = (
+                (confidence_disparity_gender is not None and confidence_disparity_gender >= 0.15)
+                or (confidence_disparity_region is not None and confidence_disparity_region >= 0.15)
+            )
+            conf_warn = (
+                (confidence_disparity_gender is not None and confidence_disparity_gender >= 0.05)
+                or (confidence_disparity_region is not None and confidence_disparity_region >= 0.05)
+            )
+
+            if len(flags) > 0 and all("Not enough decided cases" not in f for f in flags):
+                bias_level = "high"
+                bias_reasons = flags
+            elif conf_bad:
+                bias_level = "high"
+                bias_reasons = [
+                    "Confidence disparity high (" +
+                    f"gender={(confidence_disparity_gender if confidence_disparity_gender is not None else 'N/A')}, " +
+                    f"region={(confidence_disparity_region if confidence_disparity_region is not None else 'N/A')}" +
+                    ")"
+                ]
+            elif conf_warn:
+                bias_level = "normal"
+                bias_reasons = [
+                    "Confidence disparity moderate (" +
+                    f"gender={(confidence_disparity_gender if confidence_disparity_gender is not None else 'N/A')}, " +
+                    f"region={(confidence_disparity_region if confidence_disparity_region is not None else 'N/A')}" +
+                    ")"
+                ]
+
         out.append(
             {
                 "judge_user_id": int(j["id"]),
@@ -771,11 +841,19 @@ def authority_metrics_judges(
                 "decided_cases": decided,
                 "agreement_rate": (agree / decided) if decided else None,
                 "disagreement_rate": (disagree / decided) if decided else None,
-                "grant_rate_disparity_gender": _rate_disparity(grant_gender),
-                "grant_rate_disparity_region": _rate_disparity(grant_region),
-                "override_disparity_gender": _rate_disparity(override_gender),
-                "override_disparity_region": _rate_disparity(override_region),
+                "grant_rate_by_gender": grant_rate_by_gender,
+                "grant_rate_by_region": grant_rate_by_region,
+                "override_rate_by_gender": override_rate_by_gender,
+                "override_rate_by_region": override_rate_by_region,
+                "grant_rate_disparity_gender": grant_rate_disparity_gender,
+                "grant_rate_disparity_region": grant_rate_disparity_region,
+                "override_disparity_gender": override_disparity_gender,
+                "override_disparity_region": override_disparity_region,
                 "flags": flags,
+                "confidence_disparity_gender": confidence_disparity_gender,
+                "confidence_disparity_region": confidence_disparity_region,
+                "bias_level": bias_level,
+                "bias_reasons": bias_reasons,
             }
         )
 

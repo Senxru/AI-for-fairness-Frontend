@@ -398,6 +398,17 @@ export default function BiasDetectionPage() {
 
         <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-8 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur">
           <h2 className="text-xl font-semibold text-white">Judge vs AI Overview</h2>
+          <div className="mt-3 flex flex-wrap gap-3 text-xs">
+            <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-emerald-300">
+              Green: No bias signals
+            </span>
+            <span className="rounded-full border border-yellow-400/30 bg-yellow-400/10 px-3 py-1 text-yellow-300">
+              Yellow: Potential bias detected
+            </span>
+            <span className="rounded-full border border-red-400/30 bg-red-400/10 px-3 py-1 text-red-300">
+              Red: High bias detected
+            </span>
+          </div>
           {judgeTableErr && <p className="mt-2 text-sm text-red-400">{judgeTableErr}</p>}
           {!judgeTableErr && !judgeTable && <p className="mt-2 text-sm text-slate-300">Loading judge stats...</p>}
           {judgeTable && (
@@ -414,13 +425,35 @@ export default function BiasDetectionPage() {
                     <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Override Δ gender</th>
                     <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Override Δ region</th>
                     <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Flags</th>
+                    <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Grant rates (gender)</th>
+                    <th className="px-3 py-3 text-left font-semibold whitespace-nowrap">Grant rates (region)</th>
                   </tr>
                 </thead>
                 <tbody className="text-slate-200">
                   {judgeTable.map((j) => (
                     <tr key={j.judge_user_id} className="border-b border-white/5">
                       <td className="px-3 py-3">
-                        <div className="font-medium text-white">{j.full_name || j.username}</div>
+                        {(() => {
+                          const level = j.bias_level as string | undefined;
+                          const cls =
+                            level === "high"
+                              ? "text-red-300"
+                              : level === "normal"
+                                ? "text-yellow-300"
+                                : "text-emerald-300";
+                          const label =
+                            level === "high"
+                              ? "High bias detected"
+                              : level === "normal"
+                                ? "Potential bias detected"
+                                : "No bias signals";
+                          return (
+                            <>
+                              <div className={`font-medium ${cls}`}>{j.full_name || j.username}</div>
+                              <div className={`mt-1 text-[11px] ${cls}`}>{label}</div>
+                            </>
+                          );
+                        })()}
                         <div className="text-xs text-slate-400">{j.username}</div>
                       </td>
                       <td className="px-3 py-3 whitespace-nowrap">{j.decided_cases}</td>
@@ -445,11 +478,29 @@ export default function BiasDetectionPage() {
                       <td className="px-3 py-3 text-xs text-amber-200">
                         {Array.isArray(j.flags) && j.flags.length > 0 ? j.flags.join("; ") : ""}
                       </td>
+                      <td className="px-3 py-3 text-xs text-slate-200 whitespace-normal break-words">
+                        {j.grant_rate_by_gender
+                          ? Object.entries(j.grant_rate_by_gender)
+                              .filter(([, v]: any) => v !== null && v !== undefined)
+                              .slice(0, 4)
+                              .map(([k, v]: any) => `${k}: ${Math.round((v as number) * 100)}%`)
+                              .join(", ")
+                          : "N/A"}
+                      </td>
+                      <td className="px-3 py-3 text-xs text-slate-200 whitespace-normal break-words">
+                        {j.grant_rate_by_region
+                          ? Object.entries(j.grant_rate_by_region)
+                              .filter(([, v]: any) => v !== null && v !== undefined)
+                              .slice(0, 4)
+                              .map(([k, v]: any) => `${k}: ${Math.round((v as number) * 100)}%`)
+                              .join(", ")
+                          : "N/A"}
+                      </td>
                     </tr>
                   ))}
                   {judgeTable.length === 0 && (
                     <tr>
-                      <td className="px-3 py-3 text-slate-400" colSpan={9}>
+                      <td className="px-3 py-3 text-slate-400" colSpan={11}>
                         No judge decisions recorded yet.
                       </td>
                     </tr>

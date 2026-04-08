@@ -20,6 +20,16 @@ export default function AuditModePage() {
   const [judgeMetrics, setJudgeMetrics] = useState<any>(null);
   const [metricsErr, setMetricsErr] = useState<string | null>(null);
 
+  const formatRateMap = (m: Record<string, number | null> | null | undefined) => {
+    if (!m) return "N/A";
+    const entries = Object.entries(m)
+      .filter(([, v]) => v !== null && v !== undefined)
+      .slice(0, 5)
+      .map(([k, v]) => `${k}: ${Math.round((v as number) * 100)}%`);
+    if (entries.length === 0) return "N/A";
+    return entries.join(", ");
+  };
+
   useEffect(() => {
     const fetchAudit = async () => {
       try {
@@ -253,6 +263,30 @@ export default function AuditModePage() {
                     </ul>
                   </div>
                 )}
+              </div>
+
+              <div className="mt-6 rounded-lg border border-white/10 bg-slate-800/20 p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-400">
+                  Grant/Override rates by group
+                </p>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <div className="rounded-lg border border-white/10 bg-slate-900/20 p-3">
+                    <p className="text-xs text-slate-400">Grant rate (gender)</p>
+                    <p className="mt-1 text-sm text-white break-words">{formatRateMap(judgeMetrics.judge_grant_rate_by_gender)}</p>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-slate-900/20 p-3">
+                    <p className="text-xs text-slate-400">Grant rate (region)</p>
+                    <p className="mt-1 text-sm text-white break-words">{formatRateMap(judgeMetrics.judge_grant_rate_by_region)}</p>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-slate-900/20 p-3">
+                    <p className="text-xs text-slate-400">Override rate (gender)</p>
+                    <p className="mt-1 text-sm text-white break-words">{formatRateMap(judgeMetrics.override_rate_by_gender)}</p>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-slate-900/20 p-3">
+                    <p className="text-xs text-slate-400">Override rate (region)</p>
+                    <p className="mt-1 text-sm text-white break-words">{formatRateMap(judgeMetrics.override_rate_by_region)}</p>
+                  </div>
+                </div>
               </div>
             </>
           )}
