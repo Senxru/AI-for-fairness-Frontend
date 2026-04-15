@@ -61,9 +61,9 @@ def init_model_metadata() -> None:
         model_numeric_cols = []
 
 
-# -------------------------
+
 # Auth (JWT + SQLite users)
-# -------------------------
+
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "app.db")
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret-change-me")
@@ -75,8 +75,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
 def _get_db_conn() -> sqlite3.Connection:
-    # Allow usage from FastAPI's worker threads by disabling the same-thread check.
-    # Each request still gets its own connection via the dependency below.
+
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -94,14 +93,14 @@ def get_shap_explainer(background_df: pd.DataFrame):
     if shap_explainer is not None:
         return shap_explainer
 
-    # If the model is a sklearn Pipeline/ColumnTransformer stack, explain on transformed numeric features.
+   
     try:
         is_pipeline_like = hasattr(model, "steps") and hasattr(model, "__getitem__")
         if is_pipeline_like:
             pre = model[:-1]
             est = model[-1]
 
-            # Cache numeric column names from the ColumnTransformer if available
+            # Cache numeric column names from the ColumnTransformer 
             if model_numeric_cols is None:
                 try:
                     ct = model.steps[0][1]
@@ -113,7 +112,7 @@ def get_shap_explainer(background_df: pd.DataFrame):
                     model_numeric_cols = []
 
             X_bg = pre.transform(background_df)
-            # Convert sparse to dense for SHAP masker if needed
+            # Convert sparse to dense for SHAP masker 
             if hasattr(X_bg, "toarray"):
                 X_bg = X_bg.toarray()
             X_bg = np.asarray(X_bg, dtype=np.float32)
@@ -122,7 +121,7 @@ def get_shap_explainer(background_df: pd.DataFrame):
             except Exception:
                 shap_feature_names = None
 
-            # Best explainer for XGBoost: TreeExplainer on the underlying tree model.
+            
             try:
                 shap_explainer = shap.TreeExplainer(est)
                 shap_init_error = None
@@ -138,7 +137,7 @@ def get_shap_explainer(background_df: pd.DataFrame):
     except Exception:
         pass
 
-    # Fallback: try a generic explainer directly on the model (no Independent masker on raw strings).
+   
     try:
         shap_explainer = shap.Explainer(model, background_df)
         shap_feature_names = list(background_df.columns)
@@ -798,10 +797,14 @@ def authority_metrics_judges(
             flags.append("Not enough decided cases (need >= 10)")
 
         # Severity for UI coloring
-        bias_level = "none"  # none | normal | high
+        # none: no bias signals
+        # moderate: moderate/potential bias signals
+        # high: high bias signals
+        # insufficient: not enough decided cases to judge
+        bias_level = "none"  # none | insufficient | moderate | high
         bias_reasons: list[str] = []
         if decided < 10:
-            bias_level = "normal"
+            bias_level = "insufficient"
             bias_reasons = ["Not enough decided cases to make a bias judgement (need >= 10)"]
         else:
             conf_bad = (
@@ -825,7 +828,7 @@ def authority_metrics_judges(
                     ")"
                 ]
             elif conf_warn:
-                bias_level = "normal"
+                bias_level = "moderate"
                 bias_reasons = [
                     "Confidence disparity moderate (" +
                     f"gender={(confidence_disparity_gender if confidence_disparity_gender is not None else 'N/A')}, " +
@@ -932,7 +935,7 @@ def predict(payload: dict, _current_user: UserPublic = Depends(require_role("cou
 
         case_df = pd.DataFrame([row])
 
-        # 🔥 FORCE NUMERIC TYPES SAFELY
+        #  Force numeric types
         numeric_cols = [
             "prior_cases",
             "bail_cancellation_case",
@@ -949,7 +952,7 @@ def predict(payload: dict, _current_user: UserPublic = Depends(require_role("cou
         proba = model.predict_proba(case_df)[0]
         pred = int(proba[1] >= 0.5)
 
-        # ---- SHAP explanation (best-effort) ----
+        #  SHAP explanation 
         top_features = []
         shap_error = None
         try:
@@ -963,7 +966,7 @@ def predict(payload: dict, _current_user: UserPublic = Depends(require_role("cou
                         X_explain = X_explain.toarray()
                     X_explain = np.asarray(X_explain, dtype=np.float32)
 
-                # TreeExplainer works best with shap_values API (binary -> list or array)
+               
                 if hasattr(explainer, "shap_values"):
                     sv = explainer.shap_values(X_explain)
                     if isinstance(sv, list):
@@ -979,7 +982,7 @@ def predict(payload: dict, _current_user: UserPublic = Depends(require_role("cou
                 if arr.ndim == 2:
                     row_vals = arr[0]
                 elif arr.ndim == 3:
-                    # [samples, classes, features] -> pick positive class (1) if available
+                    
                     class_idx = 1 if arr.shape[1] > 1 else 0
                     row_vals = arr[0, class_idx, :]
                 else:
@@ -1010,7 +1013,7 @@ def predict(payload: dict, _current_user: UserPublic = Depends(require_role("cou
             "shap_error": shap_error,
         }
 
-        # Persist case + prediction (best-effort; won't fail prediction if DB insert fails)
+        
         try:
             conn = _get_db_conn()
             try:

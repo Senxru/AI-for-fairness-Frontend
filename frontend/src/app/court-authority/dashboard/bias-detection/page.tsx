@@ -399,6 +399,9 @@ export default function BiasDetectionPage() {
         <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-8 shadow-[0_20px_70px_rgba(15,23,42,0.55)] backdrop-blur">
           <h2 className="text-xl font-semibold text-white">Judge vs AI Overview</h2>
           <div className="mt-3 flex flex-wrap gap-3 text-xs">
+            <span className="rounded-full border border-slate-400/30 bg-slate-400/10 px-3 py-1 text-slate-200">
+              Gray: Insufficient data (&lt; 10 cases)
+            </span>
             <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-emerald-300">
               Green: No bias signals
             </span>
@@ -438,14 +441,18 @@ export default function BiasDetectionPage() {
                           const cls =
                             level === "high"
                               ? "text-red-300"
-                              : level === "normal"
+                              : level === "moderate" || level === "normal"
                                 ? "text-yellow-300"
+                                : level === "insufficient"
+                                  ? "text-slate-200"
                                 : "text-emerald-300";
                           const label =
                             level === "high"
                               ? "High bias detected"
-                              : level === "normal"
+                              : level === "moderate" || level === "normal"
                                 ? "Potential bias detected"
+                                : level === "insufficient"
+                                  ? "Insufficient data (< 10 cases)"
                                 : "No bias signals";
                           return (
                             <>
