@@ -762,7 +762,7 @@ def authority_metrics_judges(
                     bucket = "unknown"
                 if bucket not in buckets:
                     buckets[bucket] = {"count": 0, "sum_conf": 0.0}
-                # only include decided cases (rows already come from judge_decisions, so judge_decision is non-null)
+                
                 buckets[bucket]["count"] = buckets[bucket]["count"] + 1
                 buckets[bucket]["sum_conf"] = buckets[bucket]["sum_conf"] + float(r["ai_confidence"] or 0.0)
             out_avgs: dict[str, float | None] = {}

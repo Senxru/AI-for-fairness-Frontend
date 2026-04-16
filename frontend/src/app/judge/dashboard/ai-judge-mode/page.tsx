@@ -30,6 +30,17 @@ type LastPayload = {
   summary?: string;
 };
 
+type RecentCaseItem = {
+  id: string;
+  title: string;
+  status: string;
+  aiRecommendation: string;
+  confidence: number;
+  prob_granted: number;
+  prob_rejected: number;
+  top_features: { feature: string; weight: number }[];
+};
+
 export default function AIJudgeModePage() {
   const [result, setResult] = useState<PredictResponse | null>(null);
   const [payload, setPayload] = useState<LastPayload | null>(null);
@@ -83,19 +94,13 @@ export default function AIJudgeModePage() {
     return "text-orange-400";
   };
 
-  const getBiasColor = (score: number) => {
-    if (score < 3) return "text-emerald-400";
-    if (score < 5) return "text-yellow-400";
-    return "text-red-400";
-  };
-
   // Convert backend confidence (0..1) into %
   const confidencePercent = useMemo(() => {
     if (!result || "error" in result) return null;
     return Math.round((result.confidence ?? 0) * 100);
   }, [result]);
 
-  const recentCases = useMemo(() => {
+  const recentCases = useMemo<RecentCaseItem[]>(() => {
     if (!result) return [];
 
     if ("error" in result) {
@@ -106,7 +111,6 @@ export default function AIJudgeModePage() {
           status: "Backend Error",
           aiRecommendation: "N/A",
           confidence: 0,
-          biasScore: 0,
           prob_granted: 0,
           prob_rejected: 0,
           top_features: [],
@@ -124,8 +128,6 @@ export default function AIJudgeModePage() {
     const aiRecommendation =
       result.decision === "Bail Granted" ? "Grant Bail" : "Reject Bail";
 
-    const dummyBiasScore = 2.5;
-
     return [
       {
         id: String(id),
@@ -136,7 +138,6 @@ export default function AIJudgeModePage() {
           0,
           Math.min(100, Math.round((result.confidence ?? 0) * 100))
         ),
-        biasScore: dummyBiasScore,
         prob_granted: Math.round((result.prob_granted ?? 0) * 100),
         prob_rejected: Math.round((result.prob_rejected ?? 0) * 100),
         top_features: result.top_features ?? [],
@@ -239,13 +240,6 @@ export default function AIJudgeModePage() {
                         <p className="text-xs text-slate-400">Confidence</p>
                         <p className={`mt-1 font-semibold ${getConfidenceColor(caseItem.confidence)}`}>
                           {caseItem.confidence}%
-                        </p>
-                      </div>
-
-                      <div>
-                        <p className="text-xs text-slate-400">Bias Score</p>
-                        <p className={`mt-1 font-semibold ${getBiasColor(caseItem.biasScore)}`}>
-                          {caseItem.biasScore.toFixed(1)}
                         </p>
                       </div>
                     </div>

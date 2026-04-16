@@ -33,7 +33,7 @@ export default function InputDataPage() {
   if (name === "prior_cases") {
     setForm((prev) => ({
       ...prev,
-      [name]: value === "" ? 0 : Number(value), // ✅ convert to number
+      [name]: value === "" ? 0 : Number(value), //  convert to number
     }));
   } else {
     setForm((prev) => ({ ...prev, [name]: value }));

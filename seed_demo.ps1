@@ -2,8 +2,6 @@ param(
   [int]$Count = 150
 )
 
-# This seed script generates normal varied case data,
-# but injects a consistent judge bias pattern so audit metrics become visible.
 $Mode = "biased_gender"
 
 # seed_demo.ps1
@@ -61,7 +59,7 @@ function Get-Decision {
     [int]$i
   )
 
-  # Deterministic pattern so results are repeatable.
+  
   # biased_gender:
   # - female: grant 80% of the time
   # - male: grant 40% of the time
@@ -72,7 +70,7 @@ function Get-Decision {
     if (($i % 10) -lt 4) { return "Bail Granted" } else { return "Bail Rejected" }
   }
 
-  # Fallback (should not happen since we removed 'unknown' from the seed)
+  # Fallback 
   return (if (($i % 10) -lt 5) { "Bail Granted" } else { "Bail Rejected" })
 }
 
@@ -129,11 +127,11 @@ for ($i=1; $i -le $Count; $i++) {
   Write-Host "Created case_id=$($pred.case_id) AI=$($pred.decision)"
 }
 
-# Save judge decisions for each case (this is where we inject bias)
+# Save judge decisions for each case 
 for ($idx=0; $idx -lt $caseIds.Count; $idx++) {
   $caseId = $caseIds[$idx]
 
-  # Derive the same group attributes as the payload loop so we can create a controlled bias pattern.
+  
   $i = $idx + 1
   $region = $regions[($i-1) % $regions.Count]
   $gender = $genders[($i-1) % $genders.Count]
