@@ -70,7 +70,6 @@ export default function InputDataPage() {
 
       sessionStorage.setItem("ai_judge_last_payload", JSON.stringify(bodyToSend));
       sessionStorage.setItem("ai_judge_prediction_result", JSON.stringify(data));
-      // also persist for report generation across pages/tabs
       localStorage.setItem("ai_judge_last_payload", JSON.stringify(bodyToSend));
       localStorage.setItem("ai_judge_prediction_result", JSON.stringify(data));
       router.push("/judge/dashboard/ai-judge-mode");

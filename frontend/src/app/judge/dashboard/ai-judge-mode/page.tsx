@@ -11,7 +11,7 @@ type PredictResponse =
       prob_granted: number;
       prob_rejected: number;
       received_keys: string[];
-      top_features?: { feature: string; weight: number }[]; // new model explanation
+      top_features?: { feature: string; weight: number }[]; // model explanation
       shap_error?: string | null;
       case_id?: number;
     }
