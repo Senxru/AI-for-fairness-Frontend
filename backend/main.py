@@ -753,32 +753,6 @@ def authority_metrics_judges(
         override_disparity_gender = _rate_disparity(override_rate_by_gender)
         override_disparity_region = _rate_disparity(override_rate_by_region)
 
-        # Confidence disparity by group (judge-aligned confidence differences)
-        def _confidence_avgs_by(key: str) -> dict:
-            buckets: dict[str, dict[str, float | int]] = {}
-            for r in rows:
-                bucket = (r[key] or "unknown").strip() if isinstance(r[key], str) else (r[key] or "unknown")
-                if bucket == "":
-                    bucket = "unknown"
-                if bucket not in buckets:
-                    buckets[bucket] = {"count": 0, "sum_conf": 0.0}
-                
-                buckets[bucket]["count"] = buckets[bucket]["count"] + 1
-                buckets[bucket]["sum_conf"] = buckets[bucket]["sum_conf"] + float(r["ai_confidence"] or 0.0)
-            out_avgs: dict[str, float | None] = {}
-            for b, c in buckets.items():
-                decided_in_bucket = int(c["count"])
-                if decided_in_bucket >= MIN_GROUP and decided_in_bucket > 0:
-                    out_avgs[b] = float(c["sum_conf"]) / float(decided_in_bucket)
-                else:
-                    out_avgs[b] = None
-            return out_avgs
-
-        confidence_avg_by_gender = _confidence_avgs_by("accused_gender")
-        confidence_avg_by_region = _confidence_avgs_by("region")
-        confidence_disparity_gender = _rate_disparity(confidence_avg_by_gender)
-        confidence_disparity_region = _rate_disparity(confidence_avg_by_region)
-
         flags: list[str] = []
         if decided >= 10:
             dg = grant_rate_disparity_gender
@@ -807,34 +781,17 @@ def authority_metrics_judges(
             bias_level = "insufficient"
             bias_reasons = ["Not enough decided cases to make a bias judgement (need >= 10)"]
         else:
-            conf_bad = (
-                (confidence_disparity_gender is not None and confidence_disparity_gender >= 0.15)
-                or (confidence_disparity_region is not None and confidence_disparity_region >= 0.15)
-            )
-            conf_warn = (
-                (confidence_disparity_gender is not None and confidence_disparity_gender >= 0.05)
-                or (confidence_disparity_region is not None and confidence_disparity_region >= 0.05)
-            )
-
-            if len(flags) > 0 and all("Not enough decided cases" not in f for f in flags):
+            # Flag-based severity:
+            # - 0 flags -> none
+            # - 1 flag  -> moderate
+            # - 2+ flags -> high
+            real_flags = [f for f in flags if "Not enough decided cases" not in f]
+            if len(real_flags) >= 2:
                 bias_level = "high"
-                bias_reasons = flags
-            elif conf_bad:
-                bias_level = "high"
-                bias_reasons = [
-                    "Confidence disparity high (" +
-                    f"gender={(confidence_disparity_gender if confidence_disparity_gender is not None else 'N/A')}, " +
-                    f"region={(confidence_disparity_region if confidence_disparity_region is not None else 'N/A')}" +
-                    ")"
-                ]
-            elif conf_warn:
+                bias_reasons = real_flags
+            elif len(real_flags) == 1:
                 bias_level = "moderate"
-                bias_reasons = [
-                    "Confidence disparity moderate (" +
-                    f"gender={(confidence_disparity_gender if confidence_disparity_gender is not None else 'N/A')}, " +
-                    f"region={(confidence_disparity_region if confidence_disparity_region is not None else 'N/A')}" +
-                    ")"
-                ]
+                bias_reasons = real_flags
 
         out.append(
             {
@@ -853,8 +810,6 @@ def authority_metrics_judges(
                 "override_disparity_gender": override_disparity_gender,
                 "override_disparity_region": override_disparity_region,
                 "flags": flags,
-                "confidence_disparity_gender": confidence_disparity_gender,
-                "confidence_disparity_region": confidence_disparity_region,
                 "bias_level": bias_level,
                 "bias_reasons": bias_reasons,
             }
